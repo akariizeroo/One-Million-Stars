@@ -122,6 +122,7 @@
         <h3>Visuals</h3>
         <label class="field">Graphics quality
           <select data-setting="quality">
+            <option value="auto">Auto (recommended)</option>
             <option value="low">Low (fastest)</option>
             <option value="medium">Medium</option>
             <option value="high">High</option>
@@ -193,6 +194,10 @@
     <div id="pending-badge" class="hidden"><b>+0</b><small>stack</small></div>
     <div id="timer" class="hidden"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" /></svg><b>5</b></div>
 
+    <div id="lastplay" class="hidden">
+      <img id="lastplay-img" alt="" />
+      <div><small id="lastplay-who"></small><b id="lastplay-card"></b><span id="lastplay-fx"></span></div>
+    </div>
     <div id="log"></div>
 
     <div id="actions">

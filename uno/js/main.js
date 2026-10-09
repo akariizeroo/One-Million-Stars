@@ -15,7 +15,6 @@ import { UI, AI_ROSTER } from './ui.js';
 import { CARD_TYPES, COLOR_HEX, COLOR_NAMES, cardLabel, isWild } from './cards.js';
 
 const HUMAN = 0;
-const isMobile = matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700;
 
 // ------------------------------------------------------------------ persistence
 const store = {
@@ -29,8 +28,10 @@ const store = {
 };
 const settings = store.get('uno.settings', {
   master: 0.8, sfx: 0.9, ambience: 0.45, music: 0.4, voice: true,
-  quality: isMobile ? 'medium' : 'high', speed: 1, shake: true, hints: true,
+  quality: 'auto', speed: 1, shake: true, hints: true,
 });
+// v2: older saves defaulted to a fixed 'high' quality, which lagged on many machines.
+if (!settings.v2) { settings.quality = 'auto'; settings.v2 = true; store.set('uno.settings', settings); }
 const profile = store.get('uno.profile', { name: 'You', avatar: '😎', cardBack: 'classic', felt: null });
 let stats = store.get('uno.stats', {
   games: 0, wins: 0, byMode: {}, bestScore: 0, streak: 0, bestStreak: 0, matches: 0, matchesWon: 0,
@@ -96,6 +97,8 @@ function submit(action) {
     renderer.setInteractive({ playable: new Set(), jumpable: new Set(), myTurn: false });
     ui.setActions({});
     await present(game.drainEvents());
+    // A short beat after an opponent's move so you can see what happened.
+    if (action.player !== HUMAN && (action.type === 'play' || action.type === 'jumpin')) await sleep(350 / spd());
     if (token === roundToken) notify();
     return true;
   });
@@ -134,6 +137,7 @@ async function playRound() {
 
   ui.show('hud');
   ui.clearLog();
+  ui.clearLastPlay();
   ui.closeModals();
   ui.buildSeats(game.players, HUMAN);
   ui.setChips(S.mode, S.matchTo ? `Round ${match.round} · to ${S.matchTo}` : 'Single round');
@@ -253,6 +257,16 @@ function refreshHumanOutOfTurn() {
   refreshHumanActions();
 }
 
+// "Play a Blue card or a 2 — or draw": exactly what the human can do right now.
+function matchHint() {
+  const top = game.top();
+  const color = COLOR_NAMES[game.activeColor];
+  const sym = top && !isWild(top) ? (top.type === 'number' ? `a ${top.value}` : `a ${CARD_TYPES[top.type].label}`) : '';
+  const n = game.legalPlays(HUMAN).length;
+  const what = `Play a ${color} card${sym ? ` or ${sym}` : ''}`;
+  return n ? `${what} (${n} playable) · or draw` : `No playable card — click the deck to draw`;
+}
+
 function refreshHumanActions() {
   if (!game || game.phase !== 'turn') { ui.setActions({}); return; }
   const me = game.players[HUMAN];
@@ -268,7 +282,7 @@ function refreshHumanActions() {
       a.drawText = game.pending ? `Draw ${game.pending.amount}` : 'Draw';
       a.challenge = game.canChallenge(HUMAN);
       a.hint = game.pending ? (game.legalPlays(HUMAN).length ? 'Stack a matching card, or take the penalty' : 'You must take the penalty')
-        : 'Drag a card onto the table or click it · click the deck to draw';
+        : matchHint();
     }
     a.uno = me.hand.length === 2 && !me.saidUno && (game.legalPlays(HUMAN).length > 0);
   } else if (!me.out) {
@@ -416,7 +430,9 @@ function updateHUD() {
   if (game.phase === 'turn') {
     const cur = game.current;
     const speed = game.players[cur].superSpeed > 0 ? ' · SUPER SPEED ⚡' : '';
-    ui.setTurnBanner(cur === HUMAN ? (game.pending ? `Your turn · +${game.pending.amount} incoming!` : `Your turn${speed}`) : `${nameOf(cur)}'s turn${speed}`, cur === HUMAN);
+    const nxt = game.nextIndex(1);
+    const nextName = nxt === cur ? '' : nxt === HUMAN ? 'you' : nameOf(nxt);
+    ui.setTurnBanner(cur === HUMAN ? (game.pending ? `Your turn · +${game.pending.amount} incoming!` : `Your turn${speed}`) : `${nameOf(cur)}'s turn${speed}`, cur === HUMAN, nextName);
     renderer.setTurn(cur);
   }
   if (game.mode === 'chaos') {
@@ -435,6 +451,29 @@ const EVENT_SUBS = {
   shufflehands: () => 'Every hand was collected and re-dealt',
 };
 
+// Plain-language summary of what a play does, shown in the "last play" panel.
+function describePlay(e) {
+  const card = e.card;
+  const t = card.type;
+  const tgt = (pid) => (pid === HUMAN ? 'you' : nameOf(pid));
+  const nextP = game.phase === 'turn' ? tgt(game.current) : '';
+  const color = COLOR_NAMES[e.color];
+  if (t === 'number') {
+    if (game.rules.sevenO && card.value === 7 && e.target !== null && e.target !== undefined) return `Swapped hands with ${tgt(e.target)}`;
+    if (game.rules.sevenO && card.value === 0) return 'Every hand passed along';
+    return nextP ? `${nextP[0].toUpperCase()}${nextP.slice(1)} ${nextP === 'you' ? 'are' : 'is'} up` : '';
+  }
+  if (t === 'skip') return 'Next player skipped';
+  if (t === 'reverse') return 'Direction reversed';
+  if (t === 'draw2' || t === 'wild4' || t === 'plus10') {
+    const amt = game.pending ? game.pending.amount : 0;
+    return amt ? `+${amt} → ${nextP} must stack or draw${isWild(card) ? ` · color ${color}` : ''}` : `Penalty dealt${isWild(card) ? ` · color ${color}` : ''}`;
+  }
+  if (t === 'wild') return `Color is now ${color}`;
+  if (CARD_TYPES[t].hero) return CARD_TYPES[t].power;
+  return `${CARD_TYPES[t].desc || ''}`.split('.')[0];
+}
+
 async function present(events) {
   const S = spd();
   for (const e of events) {
@@ -451,6 +490,7 @@ async function present(events) {
         ui.log(`${nameOf(e.p)} played ${cardLabel(card)}${isWild(card) ? ` → ${COLOR_NAMES[e.color]}` : ''}`);
         ui.pop(e.p);
         await renderer.sync(game, { focus: [e.id], toss: e.id, flight: 0.52, arc: 1.3 });
+        ui.lastPlay(card, `${you(e.p) ? 'You' : nameOf(e.p)}${e.jump ? ' jumped in with' : ' played'}`, describePlay(e));
         renderer.setActiveColor(e.color, e.color !== e.prevColor || isWild(card));
         if (isWild(card)) { audio.wild(); ui.flash(COLOR_HEX[e.color], 0.3); }
         if (info.hero) {

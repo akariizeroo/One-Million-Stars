@@ -7,6 +7,11 @@ import { PERSONALITIES, DIFFICULTIES } from './ai.js';
 import { cardThumbDataURL, drawCardBack, CARD_BACKS } from './textures.js';
 
 const $ = (s, el = document) => el.querySelector(s);
+const cardLabelFor = (card) => {
+  const info = CARD_TYPES[card.type];
+  const color = card.color === 'wild' ? '' : `${COLOR_NAMES[card.color]} `;
+  return card.type === 'number' ? `${color}${card.value}` : `${color}${info.label}`;
+};
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -62,15 +67,45 @@ export class UI {
   setLoading(text) { $('#loading-text').textContent = text; }
 
   // ---------------------------------------------------------------- feedback
+  // Big announcements are queued so each one stays readable instead of being
+  // replaced instantly; if a backlog builds up, old ones are dropped.
   announce(title, sub = '', opts = {}) {
-    const el = document.createElement('div');
-    el.className = `ann${opts.chaos ? ' chaos' : ''}${opts.shake ? ' shake' : ''}`;
-    if (opts.glow) el.style.setProperty('--ann-glow', opts.glow);
-    el.innerHTML = `<b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}`;
-    const host = $('#announce');
-    host.replaceChildren(el);
-    setTimeout(() => el.remove(), 2300);
+    this.annQueue = this.annQueue || [];
+    this.annQueue.push({ title, sub, opts });
+    if (this.annQueue.length > 3) this.annQueue.splice(0, this.annQueue.length - 3);
+    if (!this.annBusy) this._nextAnn();
   }
+
+  _nextAnn() {
+    const a = this.annQueue.shift();
+    if (!a) { this.annBusy = false; return; }
+    this.annBusy = true;
+    const el = document.createElement('div');
+    el.className = `ann${a.opts.chaos ? ' chaos' : ''}${a.opts.shake ? ' shake' : ''}`;
+    if (a.opts.glow) el.style.setProperty('--ann-glow', a.opts.glow);
+    el.innerHTML = `<b>${esc(a.title)}</b>${a.sub ? `<small>${esc(a.sub)}</small>` : ''}`;
+    $('#announce').replaceChildren(el);
+    const hold = this.annQueue.length ? 1300 : 2200;
+    setTimeout(() => { el.remove(); this._nextAnn(); }, hold);
+  }
+
+  // Panel showing the last card played, who played it and what it did.
+  lastPlay(card, who, fx = '') {
+    this.thumbs = this.thumbs || new Map();
+    const key = `${card.color}|${card.type}|${card.value}`;
+    if (!this.thumbs.has(key)) this.thumbs.set(key, cardThumbDataURL(card, 90));
+    const el = $('#lastplay');
+    el.classList.remove('hidden', 'flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+    $('#lastplay-img').src = this.thumbs.get(key);
+    $('#lastplay-who').textContent = who;
+    $('#lastplay-card').textContent = cardLabelFor(card);
+    $('#lastplay-fx').textContent = fx;
+  }
+
+  setLastPlayFx(fx) { $('#lastplay-fx').textContent = fx; }
+  clearLastPlay() { $('#lastplay').classList.add('hidden'); }
 
   heroBanner(cardType, playerName) {
     const info = CARD_TYPES[cardType];
@@ -139,10 +174,15 @@ export class UI {
         const f = renderer.seatScreenFront(i);
         if (f) s = { x: f.x, y: f.y + 24 };
       }
-      const w = el.offsetWidth || 160;
-      el.style.left = `${Math.min(window.innerWidth - w / 2 - 8, Math.max(w / 2 + 8, s.x))}px`;
-      el.style.top = `${Math.min(window.innerHeight - 90, Math.max(minTop, s.y))}px`;
+      // Reading offsetWidth forces layout, so measure rarely and skip no-op writes.
+      if (!el._w || (this._frameCount || 0) % 60 === 0) el._w = el.offsetWidth || 160;
+      const w = el._w;
+      const left = Math.round(Math.min(window.innerWidth - w / 2 - 8, Math.max(w / 2 + 8, s.x)));
+      const top = Math.round(Math.min(window.innerHeight - 90, Math.max(minTop, s.y)));
+      if (left !== el._l) { el.style.left = `${left}px`; el._l = left; }
+      if (top !== el._t) { el.style.top = `${top}px`; el._t = top; }
     });
+    this._frameCount = (this._frameCount || 0) + 1;
   }
 
   updateSeats(game, opts = {}) {
@@ -196,10 +236,11 @@ export class UI {
   }
 
   // ---------------------------------------------------------------- HUD
-  setTurnBanner(text, mine) {
+  setTurnBanner(text, mine, next = '') {
     const b = $('#turn-banner');
-    b.textContent = text;
+    b.innerHTML = `${esc(text)}${next ? `<small>next: ${esc(next)}</small>` : ''}`;
     b.classList.toggle('mine', !!mine);
+    $('#hint-line').classList.toggle('mine', !!mine);
   }
 
   setChips(mode, roundText) {

@@ -41,10 +41,14 @@ const ease = {
 
 export const QUALITY = {
   low: { pixelRatio: 1, shadows: false, shadowSize: 0, bloom: false, dof: false, aa: false, ao: false },
-  medium: { pixelRatio: 1.25, shadows: true, shadowSize: 1024, bloom: true, dof: false, aa: true, ao: false },
-  high: { pixelRatio: 1.75, shadows: true, shadowSize: 2048, bloom: true, dof: false, aa: true, ao: true },
-  ultra: { pixelRatio: 2, shadows: true, shadowSize: 4096, bloom: true, dof: true, aa: true, ao: true },
+  medium: { pixelRatio: 1, shadows: true, shadowSize: 1024, bloom: true, dof: false, aa: false, ao: false },
+  high: { pixelRatio: 1.5, shadows: true, shadowSize: 2048, bloom: true, dof: false, aa: true, ao: false },
+  ultra: { pixelRatio: 2, shadows: true, shadowSize: 2048, bloom: true, dof: true, aa: true, ao: true },
 };
+const QUALITY_ORDER = ['low', 'medium', 'high', 'ultra'];
+// Only the top of each pile is drawn card-by-card; the rest is a solid block.
+const PILE_VISIBLE = 10;
+const DISCARD_VISIBLE = 14;
 
 // Film-style grade applied last: chromatic aberration (Chaos), saturation,
 // contrast, lens vignette and animated grain.
@@ -217,8 +221,7 @@ export class Renderer {
 
     this.geometry = buildCardGeometry();
     this.faceCache = new Map();
-    this.backMat = new THREE.MeshPhysicalMaterial({ roughness: 0.4, clearcoat: 0.6, clearcoatRoughness: 0.2, envMapIntensity: 0.45,
-      normalMap: this.paperN, normalScale: new THREE.Vector2(0.18, 0.18) });
+    this.backMat = new THREE.MeshStandardMaterial({ roughness: 0.32, envMapIntensity: 0.6 });
     this.edgeMat = new THREE.MeshStandardMaterial({ color: 0xe9e5dc, roughness: 0.75, envMapIntensity: 0.4 });
     this.setCardBack(opts.cardBack || 'classic');
 
@@ -239,6 +242,12 @@ export class Renderer {
     this.onFrame = () => {};
     this.updaters = [];
     this.glowCards = new Map();
+    // The part of the draw pile below the top few cards, drawn as one block.
+    this.deckBlock = new THREE.Mesh(new THREE.BoxGeometry(CW * 0.985, 1, CH * 0.985), this.edgeMat);
+    this.deckBlock.position.copy(DRAW_POS);
+    this.deckBlock.castShadow = true;
+    this.deckBlock.receiveShadow = true;
+    this.scene.add(this.deckBlock);
     this.envGroup = new THREE.Group();
     this.scene.add(this.envGroup);
     this.fxGroup = new THREE.Group();
@@ -335,8 +344,15 @@ export class Renderer {
     this.scene.add(this.turnDisc);
   }
 
+  // 'auto' starts at medium and adapts to the measured frame rate.
   setQuality(q) {
-    this.quality = QUALITY[q] ? q : 'high';
+    this.autoQuality = q === 'auto' || !QUALITY[q];
+    this.fps = { frames: 0, t: 0, upgraded: false, settle: 0 };
+    this._applyQuality(this.autoQuality ? 'medium' : q);
+  }
+
+  _applyQuality(q) {
+    this.quality = q;
     const Q = QUALITY[this.quality];
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Q.pixelRatio));
     this.renderer.shadowMap.enabled = Q.shadows;
@@ -488,14 +504,14 @@ export class Renderer {
       g.add(rail);
       // Brass / chrome studs
       const studMat = new THREE.MeshStandardMaterial({ color: neon ? 0xb8b8c8 : 0xc9a35a, metalness: 1, roughness: 0.25 });
-      const stud = new THREE.SphereGeometry(0.035, 12, 8);
+      const studs = new THREE.InstancedMesh(new THREE.SphereGeometry(0.035, 12, 8), studMat, 64); // one draw call
+      const m4 = new THREE.Matrix4();
       for (let i = 0; i < 64; i++) {
         const th = (i / 64) * Math.PI * 2;
         const nx = Math.cos(th) / TABLE_RX; const nz = Math.sin(th) / TABLE_RZ; const nl = Math.hypot(nx, nz);
-        const m = new THREE.Mesh(stud, studMat);
-        m.position.set(TABLE_RX * Math.cos(th) + (nx / nl) * 0.6, -0.12, TABLE_RZ * Math.sin(th) + (nz / nl) * 0.6);
-        g.add(m);
+        studs.setMatrixAt(i, m4.makeTranslation(TABLE_RX * Math.cos(th) + (nx / nl) * 0.6, -0.12, TABLE_RZ * Math.sin(th) + (nz / nl) * 0.6));
       }
+      g.add(studs);
       if (neon) {
         for (const [c, u, y] of [[0xff2bd6, 0.64, -0.04], [0x22e0ff, -0.43, 0.035]]) {
           const tube = new THREE.Mesh(sweepEllipse([[u, y], [u, y + 0.025], [u + 0.012, y + 0.025]], TABLE_RX, TABLE_RZ), new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(3.5) }));
@@ -545,28 +561,32 @@ export class Renderer {
       shade.position.set(0, 12.2, 0.4);
       g.add(shade);
       // Distant bokeh lights (slot machines, chandeliers).
+      const dots = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }), 70);
+      const dm = new THREE.Matrix4();
       for (let i = 0; i < 70; i++) {
         const a = Math.random() * Math.PI * 2;
         const r = 26 + Math.random() * 18;
-        const dot = new THREE.Mesh(new THREE.SphereGeometry(0.25 + Math.random() * 0.5, 8, 8),
-          new THREE.MeshBasicMaterial({ color: new THREE.Color().setHSL(0.04 + Math.random() * 0.1, 0.9, 0.55 + Math.random() * 0.2).multiplyScalar(2.5) }));
-        dot.position.set(Math.cos(a) * r, -1 + Math.random() * 10, Math.sin(a) * r - 6);
-        g.add(dot);
-        this.bokehDots.push(dot);
+        const sc = 0.25 + Math.random() * 0.5;
+        dm.makeScale(sc, sc, sc).setPosition(Math.cos(a) * r, -1 + Math.random() * 10, Math.sin(a) * r - 6);
+        dots.setMatrixAt(i, dm);
+        dots.setColorAt(i, new THREE.Color().setHSL(0.04 + Math.random() * 0.1, 0.9, 0.55 + Math.random() * 0.2).multiplyScalar(2.5));
       }
+      g.add(dots);
       // Chip stacks near seats.
       const chipCols = [0xc0161d, 0x1b3fa0, 0x111111, 0x0e7a3a];
+      const chipList = [];
       for (let s = 0; s < 6; s++) {
         const a = -0.9 + s * 0.36;
         for (let k = 0; k < 6 + (s % 3) * 3; k++) {
-          const chip = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.045, 24),
-            new THREE.MeshStandardMaterial({ color: chipCols[(s + k) % 4], roughness: 0.4 }));
-          chip.position.set(Math.sin(a) * 5.0 + (k % 2) * 0.01, 0.023 + k * 0.047, Math.cos(a) * 3.75 * (s % 2 ? 1 : -1) * 0.2 + 3.2);
-          if (s >= 3) chip.position.set(-chip.position.x, chip.position.y, -0.5 + (s - 3) * 0.6 - 2.2);
-          chip.castShadow = true;
-          g.add(chip);
+          const p = new THREE.Vector3(Math.sin(a) * 5.0 + (k % 2) * 0.01, 0.023 + k * 0.047, Math.cos(a) * 3.75 * (s % 2 ? 1 : -1) * 0.2 + 3.2);
+          if (s >= 3) p.set(-p.x, p.y, -0.5 + (s - 3) * 0.6 - 2.2);
+          chipList.push({ p, c: chipCols[(s + k) % 4] });
         }
       }
+      const chips = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.17, 0.17, 0.045, 24), new THREE.MeshStandardMaterial({ roughness: 0.4 }), chipList.length);
+      chipList.forEach((ch, i) => { chips.setMatrixAt(i, new THREE.Matrix4().makeTranslation(ch.p.x, ch.p.y, ch.p.z)); chips.setColorAt(i, new THREE.Color(ch.c)); });
+      chips.castShadow = true;
+      g.add(chips);
     } else if (env === 'living') {
       this.scene.fog = new THREE.Fog(0xb8a68d, 30, 70);
       this.hemi.color.set(0xfff4e2); this.hemi.groundColor.set(0x6b5440); this.hemi.intensity = 0.9;
@@ -639,8 +659,8 @@ export class Renderer {
     const key = `${card.color}|${card.type}|${card.value}`;
     let tex = this.faceCache.get(key);
     if (!tex) { tex = canvasTex(drawCardFace(card), this.renderer); this.faceCache.set(key, tex); }
-    return new THREE.MeshPhysicalMaterial({ map: tex, roughness: 0.42, clearcoat: 0.55, clearcoatRoughness: 0.22, emissive: 0x000000, envMapIntensity: 0.3,
-      normalMap: this.paperN, normalScale: new THREE.Vector2(0.18, 0.18) });
+    // Standard (not Physical/clearcoat) material: far cheaper across 100+ cards.
+    return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.32, metalness: 0, emissive: 0x000000, envMapIntensity: 0.55 });
   }
 
   ensureCard(card) {
@@ -791,21 +811,28 @@ export class Renderer {
 
   computePoses(game) {
     const poses = new Map();
+    const hiddenCount = Math.max(0, game.drawPile.length - PILE_VISIBLE);
+    this.deckBlock.visible = hiddenCount > 0;
+    if (hiddenCount) {
+      const h = hiddenCount * GAP;
+      this.deckBlock.scale.y = h;
+      this.deckBlock.position.y = h / 2;
+    }
     game.drawPile.forEach((c, i) => {
       const j = ((c.id * 9301 + 49297) % 233280) / 233280;
       poses.set(c.id, {
         pos: DRAW_POS.clone().add(new THREE.Vector3((j - 0.5) * 0.03, CT / 2 + i * GAP, (j - 0.5) * 0.02)),
-        quat: this._flat(false, (j - 0.5) * 0.05), zone: 'pile', hidden: i < game.drawPile.length - 60,
+        quat: this._flat(false, (j - 0.5) * 0.05), zone: 'pile', hidden: i < game.drawPile.length - PILE_VISIBLE,
       });
     });
     const dl = game.discard.length;
     game.discard.forEach((c, i) => {
       let jit = this.discardJitter.get(c.id);
       if (!jit) { jit = { x: (Math.random() - 0.5) * 0.35, z: (Math.random() - 0.5) * 0.3, r: (Math.random() - 0.5) * 0.9 }; this.discardJitter.set(c.id, jit); }
-      const visibleIdx = Math.max(0, i - (dl - 40));
+      const visibleIdx = Math.max(0, i - (dl - DISCARD_VISIBLE));
       poses.set(c.id, {
         pos: DISCARD_POS.clone().add(new THREE.Vector3(jit.x, CT / 2 + visibleIdx * GAP, jit.z)),
-        quat: this._flat(true, jit.r), zone: 'discard', hidden: i < dl - 40,
+        quat: this._flat(true, jit.r), zone: 'discard', hidden: i < dl - DISCARD_VISIBLE,
       });
     });
     // HERO cards that left the match vanish (their cinematic already played).
@@ -1236,6 +1263,23 @@ export class Renderer {
     if (this.game) { for (const m of this.meshes.values()) m.userData.target = null; this.sync(this.game, { dur: 0.01 }); }
   }
 
+  // Auto quality: drop a level when the frame rate sags; try one step up when smooth.
+  _adaptQuality(raw) {
+    if (!this.autoQuality || this.idle) return;
+    const f = this.fps;
+    f.frames++;
+    f.t += raw;
+    if (f.t < 2) return;
+    const fps = f.frames / f.t;
+    f.frames = 0;
+    f.t = 0;
+    f.settle++;
+    if (f.settle < 2) return; // ignore the first window after a change (shader compiles)
+    const i = QUALITY_ORDER.indexOf(this.quality);
+    if (fps < 42 && i > 0) { this._applyQuality(QUALITY_ORDER[i - 1]); f.settle = 0; f.upgraded = true; }
+    else if (fps > 58 && !f.upgraded && i < 2) { this._applyQuality(QUALITY_ORDER[i + 1]); f.settle = 0; f.upgraded = true; }
+  }
+
   _frame() {
     // Animations run on real elapsed time so they finish on schedule even at low
     // frame rates; only the particle simulation uses a clamped step.
@@ -1314,6 +1358,7 @@ export class Renderer {
       const m = this.meshes.get(id);
       if (m) m.material[0].emissive.setHex(col).multiplyScalar(0.35 + Math.sin(t * 5) * 0.2);
     }
+    this._adaptQuality(raw);
     this.onFrame(dt);
     if (this.composer) this.composer.render(dt);
     else this.renderer.render(this.scene, this.camera);
