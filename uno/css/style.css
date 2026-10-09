@@ -346,3 +346,19 @@ table.history th { color: var(--muted); font-size: 11px; text-transform: upperca
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* developer panel */
+#dev-btn { position: fixed; left: 66px; top: 12px; z-index: 80; width: 44px; height: 44px; border-radius: 14px; border: 1px solid var(--line); background: var(--glass); font-size: 20px; }
+#dev-panel { position: fixed; right: 12px; top: 64px; bottom: 12px; width: min(340px, calc(100vw - 24px)); z-index: 80; overflow-y: auto;
+  background: rgba(14, 4, 8, 0.95); border: 1px solid var(--line); border-radius: 16px; padding: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+#dev-panel header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+#dev-panel header button { background: none; border: 0; font-size: 18px; }
+#dev-panel h4 { margin: 12px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
+#dev-panel label { font-weight: 800; font-size: 13px; }
+#dev-panel select { margin-left: 8px; background: #000; color: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
+.dev-grid { display: flex; flex-wrap: wrap; gap: 5px; }
+.dev-grid button { padding: 6px 9px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.07); font-size: 12px; font-weight: 800; }
+.dev-grid button:hover { background: rgba(255,255,255,.16); }
+.dev-grid button.chaos { border-color: rgba(255,43,214,.5); }
+.dev-grid button.hero { border-color: #ffd34d; color: #ffe9a0; }
+.dev-note { color: var(--muted); font-size: 11px; }

@@ -402,6 +402,78 @@ function resume() {
   notify(); // reschedule from the current state
 }
 
+// ------------------------------------------------------------------ developer panel
+// Toggle with the ` key (or the 🛠 button when the URL contains ?dev). Lets you give
+// yourself any card, fire any Chaos event and take the turn, to test every card.
+const DEV_COLORS = ['red', 'yellow', 'green', 'blue'];
+function devRun(fn, label) {
+  if (!game || game.phase !== 'turn') { ui.toast('Start a game first'); return; }
+  busy = busy.then(async () => {
+    if (!game || game.phase !== 'turn') return;
+    fn(game);
+    version++;
+    clearTimers();
+    stopCrisis();
+    ui.log(`🛠 ${label}`);
+    await present(game.drainEvents());
+    await renderer.sync(game, { dur: 0.3 });
+    notify();
+  }).catch((e) => console.error(e));
+}
+function devGive(type, color, value = null) {
+  devRun((g) => {
+    const card = { id: g._nextId++, color: CARD_TYPES[type].wild ? 'wild' : color, type, value };
+    g.cards.set(card.id, card);
+    const me = g.players[HUMAN];
+    if (CARD_TYPES[type].hero) me.heroUsed = null; // testing: allow another hero
+    (me.stash || me.hand).push(card);
+  }, `Gave you ${cardLabel({ type, color: CARD_TYPES[type].wild ? 'wild' : color, value })}`);
+}
+function buildDevPanel() {
+  const el = document.getElementById('dev-panel');
+  const types = Object.keys(CARD_TYPES).filter((t) => t !== 'number');
+  const btn = (txt, act, cls = '') => `<button class="${cls}" data-act="${act}">${txt}</button>`;
+  el.innerHTML = `
+    <header><b>🛠 Developer</b><button data-act="close">✕</button></header>
+    <label>Color <select id="dev-color">${DEV_COLORS.map((c) => `<option>${c}</option>`).join('')}</select></label>
+    <h4>Numbers</h4><div class="dev-grid">${[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((v) => btn(v, `num:${v}`)).join('')}</div>
+    <h4>Action &amp; wild cards</h4><div class="dev-grid">${types.filter((t) => !CARD_TYPES[t].chaos).map((t) => btn(CARD_TYPES[t].label, `card:${t}`)).join('')}</div>
+    <h4>Chaos cards</h4><div class="dev-grid">${types.filter((t) => CARD_TYPES[t].chaos && !CARD_TYPES[t].hero).map((t) => btn(CARD_TYPES[t].label, `card:${t}`, 'chaos')).join('')}</div>
+    <h4>HERO cards</h4><div class="dev-grid">${types.filter((t) => CARD_TYPES[t].hero).map((t) => btn(CARD_TYPES[t].label, `card:${t}`, 'hero')).join('')}</div>
+    <h4>Chaos events</h4><div class="dev-grid">${Object.entries(CHAOS_EVENTS).map(([k, e]) => btn(e.name, `event:${k}`, 'chaos')).join('')}</div>
+    <h4>Table</h4><div class="dev-grid">
+      ${btn('My turn now', 'myturn')}${btn('Fill Chaos Meter', 'meter')}${btn('Clear draw stack', 'nopending')}
+      ${btn('Give me 5 random', 'rand5')}${btn('Leave me 2 cards', 'two')}${btn('Opponents to 1 card', 'opp1')}</div>
+    <p class="dev-note">Chaos cards, events and HERO cards only work in Chaos Mode games.</p>`;
+  el.onclick = (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    const [kind, arg] = b.dataset.act.split(':');
+    const color = document.getElementById('dev-color').value;
+    if (kind === 'close') return toggleDev(false);
+    if (kind === 'num') return devGive('number', color, +arg);
+    if (kind === 'card') {
+      if (CARD_TYPES[arg].chaos && game && game.mode !== 'chaos') return ui.toast('That card needs a Chaos Mode game');
+      return devGive(arg, color);
+    }
+    if (kind === 'event') {
+      if (game && game.mode !== 'chaos') return ui.toast('Chaos events need a Chaos Mode game');
+      return devRun((g) => g._triggerChaos(arg), `Triggered ${CHAOS_EVENTS[arg].name}`);
+    }
+    if (kind === 'myturn') return devRun((g) => { g.pending = null; g.drawnCard = null; g.current = HUMAN; g.emit({ t: 'pendingResolved' }); g.emit({ t: 'turn', p: HUMAN }); }, 'Took the turn');
+    if (kind === 'meter') return devRun((g) => { g.meter = 99; g.emit({ t: 'meter', value: 99 }); }, 'Chaos Meter at 99%');
+    if (kind === 'nopending') return devRun((g) => { g.pending = null; g.emit({ t: 'pendingResolved' }); }, 'Cleared the stack');
+    if (kind === 'rand5') return devRun((g) => g._drawCards(HUMAN, 5, 'dev'), 'Drew 5');
+    if (kind === 'two') return devRun((g) => { const h = g.players[HUMAN].hand; while (h.length > 2) g.drawPile.unshift(h.pop()); }, 'Hand cut to 2');
+    if (kind === 'opp1') return devRun((g) => { for (const p of g.players) if (p.id !== HUMAN && !p.out) while (p.hand.length > 1) g.drawPile.unshift(p.hand.pop()); }, 'Opponents down to 1 card');
+  };
+}
+function toggleDev(show) {
+  const el = document.getElementById('dev-panel');
+  if (!el.innerHTML) buildDevPanel();
+  el.classList.toggle('hidden', show === undefined ? !el.classList.contains('hidden') : !show);
+}
+
 function goMenu() {
   roundToken++;
   clearTimers();
@@ -847,6 +919,12 @@ async function boot() {
   };
   audio.setAmbience(setup.env);
   bindHud();
+  window.addEventListener('keydown', (e) => { if (e.key === '`') toggleDev(); });
+  if (location.search.includes('dev')) {
+    const db = document.getElementById('dev-btn');
+    db.classList.remove('hidden');
+    db.onclick = () => toggleDev();
+  }
   wireMenus();
   showMenuScene();
   ui.show('menu');
