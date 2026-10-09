@@ -301,6 +301,151 @@ test('Standard mode never has Mercy or Overload', () => {
   assert.deepEqual(g.mercyTargets(), []);
 });
 
+// ---------------------------------------------------------------- HERO cards
+const H = (type) => C('wild', type);
+const chaos = (hands, top = N('red', 5), extra = {}) => setup({ mode: 'chaos', hands, top, ...extra });
+
+test('HERO cards are never dealt in starting hands', () => {
+  for (let seed = 0; seed < 40; seed++) {
+    let x = seed;
+    const g = new UnoGame({ mode: 'chaos', players: Array.from({ length: 6 }, () => ({})), rng: () => ((x = (x * 9301 + 49297) % 233280) / 233280) });
+    g.start(0);
+    assert.ok(g.players.every((p) => p.hand.every((c) => !c.type.startsWith('hero_'))));
+  }
+});
+
+test('only one HERO per player: a second hero draw is replaced', () => {
+  const g = chaos([[H('hero_thor'), N('red', 1)], [N('red', 2)]]);
+  const hero2 = H('hero_cap'); const plain = N('blue', 4);
+  g.cards.set(hero2.id, hero2); g.cards.set(plain.id, plain);
+  g.drawPile.push(plain, hero2); // hero2 on top
+  g._drawCards(0, 1, 'draw');
+  assert.ok(!g.players[0].hand.includes(hero2), 'second hero not taken');
+  assert.ok(g.players[0].hand.includes(plain));
+  g.checkIntegrity();
+});
+
+test('HERO card is a Wild, sets the color, and leaves the match once covered', () => {
+  const thor = H('hero_thor');
+  const g = chaos([[thor, N('blue', 1), N('blue', 2)], [N('red', 2), N('red', 3)], [N('red', 4), N('red', 6)]]);
+  assert.ok(g.legalPlays(0).includes(thor.id));
+  play(g, 0, thor, { color: 'blue' });
+  assert.equal(g.activeColor, 'blue');
+  assert.equal(g.players[0].heroUsed, 'hero_thor');
+  // Thor skipped everyone: back to P0, who covers the hero.
+  assert.equal(g.current, 0);
+  play(g, 0, g.players[0].hand[0]);
+  assert.ok(g.removed.includes(thor), 'hero permanently removed');
+  g.checkIntegrity();
+});
+
+test('Superman: 4 uninterrupted extra turns; draw cards land immediately', () => {
+  const sup = H('hero_superman');
+  const g = chaos([[sup, N('red', 1), N('red', 2), C('red', 'draw2'), N('red', 3), N('red', 4), N('red', 6)], [N('green', 2), N('green', 3)], [N('green', 4), N('green', 6)]]);
+  play(g, 0, sup, { color: 'red' });
+  for (let k = 0; k < 4; k++) {
+    assert.equal(g.current, 0, `extra turn ${k + 1}`);
+    assert.deepEqual(g.mercyTargets(), []);
+    const c = g.players[0].hand.find((x) => g.legalPlays(0).includes(x.id));
+    play(g, 0, c);
+  }
+  assert.equal(g.current, 1, 'play passes on after four extra turns');
+  assert.equal(g.players[1].hand.length, 4, 'the +2 hit P1 instantly');
+  assert.equal(g.pending, null);
+});
+
+test('Captain America: shield rebounds a draw stack onto the attacker', () => {
+  const cap = H('hero_cap');
+  const g = chaos([[C('red', 'draw2'), N('red', 1), N('red', 9)], [cap, N('green', 3), N('green', 4)], [N('green', 5), N('green', 6)]]);
+  play(g, 0, g.players[0].hand[0]);
+  assert.ok(g.legalPlays(1).includes(cap.id), 'Cap can answer a stack');
+  play(g, 1, cap, { color: 'green' });
+  assert.equal(g.current, 0, 'stack rebounds to the attacker');
+  assert.equal(g.pending.amount, 2);
+  g.apply({ type: 'draw', player: 0 });
+  assert.equal(g.players[0].hand.length, 4);
+});
+
+test('Captain America: Skip and Everyone +4 rebound while the shield is up', () => {
+  const cap = H('hero_cap');
+  const g = chaos([[cap, N('red', 1), N('red', 2)], [C('green', 'skip'), C('wild', 'everyone4'), N('green', 4), N('green', 8)], [N('green', 5), N('green', 6)]], N('red', 5));
+  play(g, 0, cap, { color: 'green' });
+  play(g, 1, g.players[1].hand[1], { color: 'green' }); // everyone4
+  assert.equal(g.players[0].hand.length, 2, 'shielded player draws nothing');
+  assert.equal(g.players[1].hand.length, 3 + 4, 'attacker draws the rebound');
+  assert.equal(g.players[2].hand.length, 6);
+});
+
+test('Captain America: shield expires after its owner\'s next turn', () => {
+  const cap = H('hero_cap');
+  const g = chaos([[cap, N('red', 1), N('red', 2)], [N('red', 3), N('red', 4)]], N('red', 5));
+  play(g, 0, cap, { color: 'red' });
+  assert.ok(g.players[0].shield);
+  play(g, 1, g.players[1].hand[0]);
+  assert.ok(g.players[0].shield, 'still up during the round');
+  play(g, 0, g.players[0].hand[0]);
+  assert.equal(g.players[0].shield, null);
+});
+
+test('Sentry: opponents draw 15; hand set aside; exact golden match wins', () => {
+  const sentry = H('hero_sentry');
+  const g = chaos([[sentry, N('blue', 1), N('blue', 2)], [N('red', 3), N('red', 4)], [N('green', 5), N('green', 6)]]);
+  // Plant the golden card: the topmost number card in the pile.
+  const golden = N('yellow', 7); g.cards.set(golden.id, golden); g.drawPile.push(golden);
+  play(g, 0, sentry, { color: 'red' });
+  // Opponents drew 15 first, so the golden card is the next number card after those.
+  assert.equal(g.players[1].hand.length, 17);
+  assert.equal(g.players[0].hand.length, 1);
+  assert.equal(g.players[0].stash.length, 2);
+  assert.deepEqual(g.mercyTargets(), [], 'golden state is immune to Mercy');
+  const gold = g.players[0].hand[0];
+  // Make the top card an exact match before P0's turn comes round.
+  const match = { id: idSeq++, color: gold.color, type: 'number', value: gold.value };
+  g.cards.set(match.id, match);
+  g.players[1].hand.push(match);
+  g.activeColor = gold.color;
+  play(g, 1, match);
+  g.apply({ type: 'draw', player: 2 });
+  if (g.current === 2) g.apply({ type: 'pass', player: 2 });
+  assert.equal(g.winner, 0, 'exact match: Sentry wins');
+  assert.equal(g.winHow, 'sentry');
+});
+
+test('Sentry: no exact match → the real hand returns', () => {
+  const sentry = H('hero_sentry');
+  const g = chaos([[sentry, N('blue', 1), N('blue', 2)], [N('red', 3), N('red', 4)]]);
+  play(g, 0, sentry, { color: 'red' });
+  const gold = g.players[0].hand[0];
+  const other = { id: idSeq++, color: 'red', type: 'number', value: gold.value === 9 ? 8 : 9 };
+  g.cards.set(other.id, other); g.players[1].hand.push(other);
+  play(g, 1, other);
+  assert.equal(g.current, 0);
+  assert.equal(g.players[0].stash, null);
+  assert.equal(g.players[0].hand.length, 2, 'blue 1 and blue 2 are back');
+  g.checkIntegrity();
+});
+
+test('Thor: escalating +4, +8, +12 and every opponent loses a turn; pierces shields', () => {
+  const thor = H('hero_thor');
+  const g = chaos([[thor, N('red', 1), N('red', 2)], [N('green', 1)], [N('green', 2)], [N('green', 3)]]);
+  g.players[2].shield = 'armed';
+  play(g, 0, thor, { color: 'red' });
+  assert.deepEqual(counts(g), [2, 5, 9, 13]);
+  assert.equal(g.current, 0, 'all opponents skipped');
+});
+
+test('HERO cards cannot be stolen or swapped', () => {
+  const thor = H('hero_thor');
+  const g = chaos([[C('red', 'steal3'), N('red', 1), N('red', 2)], [thor, N('green', 1), N('green', 2), N('green', 3), N('green', 4)], [N('green', 5), N('green', 6)]]);
+  play(g, 0, g.players[0].hand[0], { target: 1 });
+  assert.ok(g.players[1].hand.includes(thor));
+  g._triggerChaos('swap');
+  g._triggerChaos('reverseReality');
+  const owner = g.players.find((p) => p.hand.includes(thor));
+  assert.equal(owner.id, 1);
+  g.checkIntegrity();
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`  ✓ ${name}`); } catch (e) { failed++; console.log(`  ✗ ${name}\n    ${e.message}`); }

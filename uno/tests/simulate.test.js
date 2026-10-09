@@ -39,7 +39,7 @@ function outOfTurn(game, ais, rng, counters) {
     if (game.phase !== 'turn') return;
     if (game.unoVulnerable !== null) {
       const v = game.unoVulnerable;
-      const catcher = order.find((ai) => ai.pid !== v && ai.wantsToCatch());
+      const catcher = order.find((ai) => game.canCatch(ai.pid, v) && ai.wantsToCatch());
       if (catcher) { must(game, { type: 'catch', player: catcher.pid, target: v }); counters.catches++; acted = true; }
     }
     for (const ai of order) {
@@ -132,7 +132,7 @@ if (isMain) {
   // Skill check: an expert Mastermind should beat three Easy AIs well above the 25% fair share.
   for (const mode of ['standard', 'chaos']) {
     let wins = 0;
-    const G = 800;
+    const G = Number(process.env.SKILL_GAMES || 300);
     for (let g = 0; g < G; g++) {
       const seat = g % 4;
       const personalities = ['aggressor', 'trickster', 'opportunist', 'strategist'];

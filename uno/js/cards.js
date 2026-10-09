@@ -42,7 +42,19 @@ export const CARD_TYPES = {
                   desc: 'Collect every hand and deal the cards back out evenly, starting with the next player.' },
   laststand:    { label: 'Last Stand',      points: 50, wild: true,  chaos: true, action: true,
                   desc: 'Only playable when you hold two cards or fewer. Every opponent draws five.' },
+  // ---- HERO cards (Chaos only, extremely rare, one per player per match) ----
+  hero_superman: { label: 'Superman', title: 'The Man of Steel', power: 'Super Speed', points: 100, wild: true, chaos: true, action: true, hero: true,
+                  desc: 'Take 4 consecutive turns. Nobody can interrupt, catch you or call Mercy until you finish.' },
+  hero_cap:      { label: 'Captain America', title: 'The First Avenger', power: 'Vibranium Shield', points: 100, wild: true, chaos: true, action: true, hero: true,
+                  desc: 'A shield protects you for one round: draw stacks, Skips and attacks aimed at you rebound onto the attacker. Can be played instantly against a draw stack. Other HERO abilities pierce it.' },
+  hero_sentry:   { label: 'Sentry', title: 'The Golden Guardian', power: 'Power of a Million Exploding Suns', points: 100, wild: true, chaos: true, action: true, hero: true,
+                  desc: 'Every opponent draws 15. Your hand is set aside and you hold one golden card for a round: if it exactly matches the top card (number AND color) when your turn comes, you win. Otherwise your hand returns.' },
+  hero_thor:     { label: 'Thor', title: 'God of Thunder', power: "Mjolnir's Wrath", points: 100, wild: true, chaos: true, action: true, hero: true,
+                  desc: 'Mjolnir circles the table: each opponent in turn draws +4, +8, +12… and loses their next turn.' },
 };
+
+export const HERO_TYPES = ['hero_superman', 'hero_cap', 'hero_sentry', 'hero_thor'];
+export const isHero = (card) => !!card && card.type.startsWith('hero_');
 
 export const CHAOS_CARD_COUNTS = {
   plus10: 2, everyone4: 2, colorlock: 2, chaoswild: 3, mirror: 3, shufflehands: 2, laststand: 2,
@@ -73,6 +85,7 @@ export function makeDeck(mode, nextId) {
   }
   for (let i = 0; i < 4; i++) { add('wild', 'wild'); add('wild', 'wild4'); }
   if (mode === 'chaos') {
+    for (const type of HERO_TYPES) add('wild', type);
     for (const [type, count] of Object.entries(CHAOS_CARD_COUNTS)) {
       if (CARD_TYPES[type].wild) {
         for (let i = 0; i < count; i++) add('wild', type);
@@ -86,7 +99,8 @@ export function makeDeck(mode, nextId) {
 
 // Sort key used for displaying a hand.
 const TYPE_ORDER = ['number', 'skip', 'reverse', 'draw2', 'ultreverse', 'steal3', 'destroyer',
-  'wild', 'wild4', 'colorlock', 'chaoswild', 'mirror', 'shufflehands', 'plus10', 'everyone4', 'laststand'];
+  'wild', 'wild4', 'colorlock', 'chaoswild', 'mirror', 'shufflehands', 'plus10', 'everyone4', 'laststand',
+  'hero_superman', 'hero_cap', 'hero_sentry', 'hero_thor'];
 export function handSortKey(card) {
   const ci = card.color === 'wild' ? 4 : COLORS.indexOf(card.color);
   return ci * 1000 + TYPE_ORDER.indexOf(card.type) * 20 + (card.value ?? 0);

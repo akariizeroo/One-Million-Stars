@@ -2,8 +2,9 @@
 // own hand, card counts, the discard pile and the public action history — never
 // another player's hidden cards.
 
-import { COLORS, CARD_TYPES, cardPoints, isWild, STACK_RANK } from './cards.js';
+import { COLORS, cardPoints, isWild, STACK_RANK } from './cards.js';
 import { METER_GAIN } from './engine.js';
+import { rolloutValue } from './lookahead.js';
 
 export const PERSONALITIES = {
   strategist: { name: 'Strategist', icon: '♟', blurb: 'Counts cards, remembers plays and plans ahead.',
@@ -27,6 +28,9 @@ export const DIFFICULTIES = {
 
 const threatOf = (count) => (count <= 1 ? 3.2 : count === 2 ? 2.2 : count <= 4 ? 1.1 : 0.35);
 
+// Monte Carlo rollouts per decision (0 = heuristics only). Lowered in fast tests.
+export const LOOKAHEAD = { mastermind: { expert: 160, hard: 70 }, strategist: { expert: 60 }, scale: 1 };
+
 export class AIPlayer {
   constructor(pid, personality, difficulty, rng = Math.random) {
     this.pid = pid;
@@ -38,6 +42,27 @@ export class AIPlayer {
     this.cursor = 0;
     this.models = new Map(); // pid -> { lack: {color:0..1}, lackWild, challenges, wd4Faced, bluffsCaught }
     this.lastHistory = null;
+  }
+
+  get rolloutBudget() {
+    const b = (LOOKAHEAD[this.personality] || {})[this.difficulty] || 0;
+    return Math.round(b * LOOKAHEAD.scale);
+  }
+
+  // Pick among candidate actions by simulated win rate (heuristic score breaks ties).
+  lookahead(view, scored) {
+    const budget = this.rolloutBudget;
+    if (!budget || scored.length < 2) return null;
+    scored.sort((a, b) => b.score - a.score);
+    const cands = scored.slice(0, 4);
+    const per = Math.max(6, Math.floor(budget / cands.length));
+    let best = null;
+    let bestV = -Infinity;
+    for (const c of cands) {
+      const v = rolloutValue(view, this, c.action, per, this.rng) + 0.004 * c.score;
+      if (v > bestV) { bestV = v; best = c.action; }
+    }
+    return best;
   }
 
   // Opponent modeling is unlocked by personality OR difficulty.
@@ -256,14 +281,16 @@ export class AIPlayer {
     let best = null;
     let bestScore = -Infinity;
     const us = this.unseen(view);
+    const scored = [];
     for (const card of legal) {
       if (card.type === 'wild4' && holdsActive(card) && !this.willBluff(view)) continue;
       const action = this.playAction(view, card, us);
       const s = this.scorePlay(view, card, action, us) + (this.rng() - 0.5) * 2 * this.D.noise;
+      scored.push({ action, score: s });
       if (s > bestScore) { bestScore = s; best = action; }
     }
     if (!best) return { type: 'draw', player: this.pid };
-    return best;
+    return this.lookahead(view, scored) || best;
   }
 
   willBluff(view) {
@@ -374,6 +401,25 @@ export class AIPlayer {
       case 'steal3': s += this.personality === 'trickster' ? 0.3 : -1.3; break;
       case 'destroyer': s += -0.4; break;
       case 'mirror': s -= 3.5; break; // hold for defence
+      // ---- HERO cards: once per match, so timing is everything.
+      case 'hero_superman':
+        // Four uninterrupted turns: devastating when it can carry me to (or near) zero.
+        s += (me <= 5 ? 9 : me <= 7 ? 3 : -1.5) + (minOpp <= 2 ? 3 : 0);
+        break;
+      case 'hero_cap':
+        // A shield is a defensive tool; hold it unless I'm about to go out or under fire.
+        s += me <= 2 ? 1 : minOpp <= 2 ? 0.5 : -3;
+        break;
+      case 'hero_sentry':
+        // +15 to every opponent: save it for when someone threatens to win.
+        s += minOpp <= 3 ? 10 : avg > 9 ? -1 : 2;
+        break;
+      case 'hero_thor': {
+        let threat = 0;
+        for (let i = 0; i < n; i++) if (i !== view.me && !view.out[i]) threat += threatOf(view.counts[i]);
+        s += minOpp <= 3 ? 8 + threat * 0.5 : 2.5;
+        break;
+      }
       default: break;
     }
 
@@ -433,9 +479,13 @@ export class AIPlayer {
     const us = this.unseen(view);
     let best = null;
     let bestScore = 0; // drawing scores 0
+    const scored = [{ action: { type: 'draw', player: this.pid }, score: 0 }];
     for (const card of legal) {
       let s = 2 + pend.amount * 0.4;
-      if (card.type === 'mirror') {
+      if (card.type === 'hero_cap') {
+        // Shield the stack back at the attacker — worth it for anything sizeable.
+        s = pend.amount >= 6 ? 6 + pend.amount * 0.5 : 0.5;
+      } else if (card.type === 'mirror') {
         const attacker = pend.attacker;
         s += pend.amount >= 6 || this.personality === 'aggressor' ? 1.5 : -1.2;
         s += threatOf(view.counts[attacker]) * 0.6;
@@ -445,8 +495,11 @@ export class AIPlayer {
         if (card.type === 'plus10' && this.P.flex > 1) s -= 0.6;
       }
       s += (this.rng() - 0.5) * this.D.noise;
+      scored.push({ action: this.playAction(view, card, us), score: s });
       if (s > bestScore) { bestScore = s; best = card; }
     }
+    const la = this.lookahead(view, scored);
+    if (la) return la;
     return best ? this.playAction(view, best, us) : { type: 'draw', player: this.pid };
   }
 

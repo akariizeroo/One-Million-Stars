@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#120206" />
+  <title>UNO Ultra</title>
+  <meta name="description" content="A 3D UNO tabletop game with Standard house rules, a Chaos Mode, and AI opponents." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@500;700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="flash"></div>
+  <div id="vignette"></div>
+
+  <!-- ============================== LOADING -->
+  <section id="loading" class="screen active">
+    <div class="logo-big">UNO<span>ULTRA</span></div>
+    <div class="loader"><div></div></div>
+    <p id="loading-text">Shuffling the deck…</p>
+  </section>
+
+  <!-- ============================== MAIN MENU -->
+  <section id="menu" class="screen">
+    <div class="menu-wrap">
+      <div class="logo-big">UNO<span>ULTRA</span></div>
+      <p class="tagline">Tabletop simulator · Standard house rules · Chaos Mode</p>
+      <nav class="menu-buttons">
+        <button class="btn big primary" data-go="setup">▶ Play</button>
+        <button class="btn" data-go="modes">Modes &amp; Rules</button>
+        <button class="btn" data-go="settings">Settings</button>
+        <button class="btn" data-go="stats">Statistics</button>
+        <button class="btn" data-go="customize">Customization</button>
+      </nav>
+    </div>
+  </section>
+
+  <!-- ============================== GAME SETUP -->
+  <section id="setup" class="screen panel-screen">
+    <div class="panel wide">
+      <header><button class="back" data-go="menu">‹</button><h2>Game Setup</h2></header>
+      <div class="panel-body">
+        <h3>Mode</h3>
+        <div class="choice-row" id="mode-choice">
+          <button class="choice mode-card" data-mode="standard">
+            <b>Standard</b><small>Classic UNO plus house rules you choose. Default: Progressive stacking, Jump-In and Seven-O.</small>
+          </button>
+          <button class="choice mode-card chaos" data-mode="chaos">
+            <b>Chaos</b><small>Exclusive chaos cards, the Chaos Meter, random events, Mercy and Overload knockouts.</small>
+          </button>
+        </div>
+
+        <div id="house-rules">
+          <h3>House Rules <button class="link" id="rules-default">Reset to default</button></h3>
+          <div class="toggles" id="rule-toggles"></div>
+        </div>
+
+        <h3>Opponents</h3>
+        <div class="seg" id="opp-count">
+          <button data-n="1">1</button><button data-n="2">2</button><button data-n="3" class="on">3</button><button data-n="4">4</button><button data-n="5">5</button>
+        </div>
+        <div class="row gap">
+          <label class="field">AI difficulty
+            <select id="difficulty">
+              <option value="easy">Easy</option>
+              <option value="normal" selected>Normal</option>
+              <option value="hard">Hard</option>
+              <option value="expert">Expert</option>
+            </select>
+          </label>
+          <label class="field">Match length
+            <select id="match-length">
+              <option value="0">Single round</option>
+              <option value="500" selected>First to 500 points</option>
+              <option value="250">First to 250 points</option>
+            </select>
+          </label>
+        </div>
+        <div id="opp-list" class="opp-list"></div>
+
+        <h3>Environment</h3>
+        <div class="choice-row" id="env-choice">
+          <button class="choice env-card casino" data-env="casino"><b>Luxury Casino</b><small>Green felt, warm lamp light</small></button>
+          <button class="choice env-card living" data-env="living"><b>Living Room</b><small>Wooden table, daylight</small></button>
+          <button class="choice env-card neon" data-env="neon"><b>Neon Lounge</b><small>Glow, haze and bass</small></button>
+        </div>
+      </div>
+      <footer><button class="btn big primary" id="start-game">Deal the cards</button></footer>
+    </div>
+  </section>
+
+  <!-- ============================== MODES / RULES -->
+  <section id="modes" class="screen panel-screen">
+    <div class="panel wide">
+      <header><button class="back" data-go="menu">‹</button><h2>Modes &amp; Rules</h2></header>
+      <div class="panel-body" id="rules-body"></div>
+    </div>
+  </section>
+
+  <!-- ============================== SETTINGS -->
+  <section id="settings" class="screen panel-screen">
+    <div class="panel">
+      <header><button class="back" data-back>‹</button><h2>Settings</h2></header>
+      <div class="panel-body">
+        <h3>Sound</h3>
+        <label class="slider">Master <input type="range" min="0" max="1" step="0.05" data-setting="master" /></label>
+        <label class="slider">Effects <input type="range" min="0" max="1" step="0.05" data-setting="sfx" /></label>
+        <label class="slider">Ambience <input type="range" min="0" max="1" step="0.05" data-setting="ambience" /></label>
+        <label class="slider">Music <input type="range" min="0" max="1" step="0.05" data-setting="music" /></label>
+        <label class="check"><input type="checkbox" data-setting="voice" /> Voice announcements ("UNO!")</label>
+        <h3>Visuals</h3>
+        <label class="field">Graphics quality
+          <select data-setting="quality">
+            <option value="low">Low (fastest)</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="ultra">Ultra (depth of field)</option>
+          </select>
+        </label>
+        <label class="field">Animation speed
+          <select data-setting="speed">
+            <option value="0.8">Cinematic</option>
+            <option value="1">Normal</option>
+            <option value="1.5">Fast</option>
+            <option value="2.2">Turbo</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" data-setting="shake" /> Camera shake &amp; cinematic moves</label>
+        <label class="check"><input type="checkbox" data-setting="hints" /> Highlight playable cards</label>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== STATISTICS -->
+  <section id="stats" class="screen panel-screen">
+    <div class="panel wide">
+      <header><button class="back" data-go="menu">‹</button><h2>Statistics</h2></header>
+      <div class="panel-body" id="stats-body"></div>
+    </div>
+  </section>
+
+  <!-- ============================== CUSTOMIZE -->
+  <section id="customize" class="screen panel-screen">
+    <div class="panel wide">
+      <header><button class="back" data-go="menu">‹</button><h2>Customization</h2></header>
+      <div class="panel-body">
+        <label class="field">Player name <input id="cust-name" maxlength="14" /></label>
+        <h3>Avatar</h3>
+        <div class="avatar-grid" id="avatar-grid"></div>
+        <h3>Card back</h3>
+        <div class="back-grid" id="back-grid"></div>
+        <h3>Table felt</h3>
+        <div class="felt-grid" id="felt-grid"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== IN-GAME HUD -->
+  <section id="hud" class="screen">
+    <div class="hud-top">
+      <button class="icon-btn" id="pause-btn" aria-label="Pause">❚❚</button>
+      <div id="turn-banner">Your turn</div>
+      <div class="hud-chips">
+        <span id="mode-chip" class="chip"></span>
+        <span id="round-chip" class="chip"></span>
+      </div>
+    </div>
+
+    <div id="chaos-meter" class="hidden">
+      <div class="meter-label">CHAOS <span id="chaos-level">Lv 0</span></div>
+      <div class="meter-track"><div class="meter-fill" id="meter-fill"></div></div>
+    </div>
+    <div id="effects"></div>
+
+    <div id="table-info">
+      <div class="info-color" id="info-color" title="Active color"></div>
+      <div class="info-dir" id="info-dir" title="Direction">⟳</div>
+      <div class="info-deck"><b id="info-deck">0</b><small>deck</small></div>
+    </div>
+
+    <div id="seats"></div>
+    <div id="pending-badge" class="hidden"><b>+0</b><small>stack</small></div>
+    <div id="timer" class="hidden"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" /></svg><b>5</b></div>
+
+    <div id="log"></div>
+
+    <div id="actions">
+      <button class="act mercy hidden" id="btn-mercy">MERCY!</button>
+      <button class="act catch hidden" id="btn-catch">CATCH!</button>
+      <button class="act challenge hidden" id="btn-challenge">Challenge +4</button>
+      <button class="act keep hidden" id="btn-keep">Keep card</button>
+      <button class="act draw hidden" id="btn-draw">Draw</button>
+      <button class="act uno hidden" id="btn-uno">UNO!</button>
+    </div>
+    <div id="hint-line"></div>
+  </section>
+
+  <div id="announce"></div>
+  <div id="toasts"></div>
+
+  <!-- ============================== MODALS -->
+  <div id="modal-color" class="modal hidden">
+    <div class="modal-card">
+      <h3>Choose a color</h3>
+      <div class="color-wheel">
+        <button data-color="red" aria-label="Red"></button>
+        <button data-color="blue" aria-label="Blue"></button>
+        <button data-color="yellow" aria-label="Yellow"></button>
+        <button data-color="green" aria-label="Green"></button>
+      </div>
+    </div>
+  </div>
+  <div id="modal-target" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="target-title">Choose a player</h3>
+      <div id="target-list" class="target-list"></div>
+    </div>
+  </div>
+  <div id="modal-pause" class="modal hidden">
+    <div class="modal-card">
+      <h3>Paused</h3>
+      <div class="col">
+        <button class="btn primary" id="resume-btn">Resume</button>
+        <button class="btn" id="pause-settings">Settings</button>
+        <button class="btn" id="pause-rules">Rules</button>
+        <button class="btn danger" id="quit-btn">Quit to menu</button>
+      </div>
+    </div>
+  </div>
+  <div id="modal-round" class="modal hidden">
+    <div class="modal-card result">
+      <h2 id="round-title">Victory!</h2>
+      <p id="round-sub"></p>
+      <table id="round-table"></table>
+      <div class="row gap center">
+        <button class="btn primary" id="next-round">Next round</button>
+        <button class="btn" id="round-menu">Main menu</button>
+      </div>
+    </div>
+  </div>
+
+  <noscript>This game needs JavaScript and WebGL.</noscript>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

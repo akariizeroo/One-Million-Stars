@@ -11,7 +11,7 @@
 // and may play it or pass).
 
 import {
-  COLORS, CARD_TYPES, makeDeck, cardPoints, isWild, DRAW_VALUE, STACK_RANK,
+  COLORS, CARD_TYPES, makeDeck, cardPoints, isWild, isHero, DRAW_VALUE, STACK_RANK,
 } from './cards.js';
 
 export const CHAOS_EVENTS = {
@@ -44,7 +44,7 @@ export const MERCY_THRESHOLD = 20;
 export const OVERLOAD_LIMIT = 30;
 export const CHAOS_STACK_CAP = 40;
 
-const FINISHING_EFFECTS = new Set(['draw2', 'wild4', 'plus10', 'mirror', 'everyone4', 'laststand']);
+const FINISHING_EFFECTS = new Set(['draw2', 'wild4', 'plus10', 'mirror', 'everyone4', 'laststand', 'hero_cap']);
 
 // Standard Mode house rules. Each one is a real, widely played UNO house rule and
 // can be toggled individually; DEFAULT_RULES is the default preset.
@@ -81,13 +81,17 @@ export class UnoGame {
     this.stackCap = cfg.stackCap ?? CHAOS_STACK_CAP;
     this.overloadLimit = cfg.overloadLimit ?? OVERLOAD_LIMIT;
     this.meterScale = cfg.meterScale ?? 0.7;
-    this.players = cfg.players.map((p, i) => ({ ...p, id: i, hand: [], saidUno: false, out: false }));
+    // Per-player HERO state: heroUsed (one per match), shield ('fresh' → 'armed' → gone),
+    // superSpeed (extra turns left), stash (Sentry: real hand set aside), skipNext (Thor).
+    this.players = cfg.players.map((p, i) => ({ ...p, id: i, hand: [], saidUno: false, out: false,
+      heroUsed: null, shield: null, superSpeed: 0, stash: null, skipNext: false }));
     this.n = this.players.length;
     if (this.n < 2) throw new Error('UNO needs at least two players');
     this._nextId = 1;
     this.cards = new Map(); // id -> card (every card ever created)
     this.drawPile = []; // top of pile = end of array
     this.discard = []; // top card = end of array
+    this.removed = []; // HERO cards permanently removed from the match
     this.activeColor = null;
     this.direction = 1;
     this.current = 0;
@@ -103,7 +107,7 @@ export class UnoGame {
     this.roundScore = 0;
     this.events = [];
     this.history = [];
-    this.stats = { cardsPlayed: 0, chaosEvents: 0, maxStack: 0, challenges: 0, decksAdded: 0, jumpIns: 0, swaps: 0 };
+    this.stats = { cardsPlayed: 0, chaosEvents: 0, maxStack: 0, challenges: 0, decksAdded: 0, jumpIns: 0, swaps: 0, heroes: 0 };
   }
 
   // ------------------------------------------------------------------ helpers
@@ -157,7 +161,9 @@ export class UnoGame {
     const order = [];
     for (let r = 0; r < this.handSize; r++) {
       for (const p of this.players) {
-        const c = this.drawPile.pop();
+        let c = this.drawPile.pop();
+        // HERO cards are never dealt: they can only be found by drawing.
+        while (isHero(c)) { this.drawPile.splice(Math.floor(this.rng() * (this.drawPile.length - 20)), 0, c); c = this.drawPile.pop(); }
         p.hand.push(c);
         order.push({ p: p.id, id: c.id });
       }
@@ -188,6 +194,7 @@ export class UnoGame {
     if (fx.collapse && card.color === fx.collapse.color) return false;
     if (fx.lock && !isWild(card) && card.color !== fx.lock.color) return false;
     if (card.type === 'laststand' && p.hand.length > 2) return false;
+    if (isHero(card)) return !this.pending || card.type === 'hero_cap';
     if (this.pending) return this._canStack(card);
     if (isWild(card)) return true;
     if (card.color === this.activeColor) return true;
@@ -239,17 +246,17 @@ export class UnoGame {
   // The pair [onePid, bigPid] that Mercy would knock out right now, or [] if it can't be called.
   // With several candidates: the one-card player soonest in turn order, and the biggest hand.
   mercyTargets() {
-    if (this.mode !== 'chaos' || this.phase !== 'turn') return [];
+    if (this.mode !== 'chaos' || this.phase !== 'turn' || this.superSpeedActive()) return [];
     const alive = this.active();
     if (alive.length < 3) return [];
-    const big = alive.filter((p) => p.hand.length >= MERCY_THRESHOLD)
-      .sort((a, b) => b.hand.length - a.hand.length)[0];
+    const big = alive.filter((p) => this.handCount(p) >= MERCY_THRESHOLD)
+      .sort((a, b) => this.handCount(b) - this.handCount(a))[0];
     if (!big) return [];
     let one = null;
     let i = this.current;
     for (let k = 0; k < this.n && !one; k++) {
       const p = this.players[i];
-      if (!p.out && p.hand.length === 1) one = p;
+      if (!p.out && p.hand.length === 1 && !p.stash) one = p;
       i = this.nextIndex(1, i);
     }
     return one ? [one.id, big.id] : [];
@@ -259,6 +266,16 @@ export class UnoGame {
     const targets = this.mercyTargets();
     return targets.length > 0 && !this.players[pid].out && pid !== targets[0];
   }
+
+  canCatch(pid, target) {
+    return this.phase === 'turn' && !this.superSpeedActive() && this.unoVulnerable !== null
+      && this.unoVulnerable === target && target !== pid && !this.players[pid].out;
+  }
+
+  superSpeedActive() { return this.players.some((p) => p.superSpeed > 0 && !p.out); }
+  handCount(p) { return p.hand.length + (p.stash ? p.stash.length : 0); }
+  // Players whose hands may be mixed, stolen from or swapped (not knocked out, not in Sentry's golden state).
+  mixable() { return this.active().filter((p) => !p.stash); }
 
   canChallenge(pid) {
     return this.phase === 'turn' && pid === this.current && !!this.pending && this.pending.challengeable;
@@ -275,8 +292,9 @@ export class UnoGame {
       rules: { ...this.rules },
       n: this.n,
       hand: me.hand.map((c) => ({ ...c })),
-      counts: this.players.map((p) => p.hand.length),
+      counts: this.players.map((p) => this.handCount(p)),
       out: this.players.map((p) => p.out),
+      heroes: this.players.map((p) => ({ used: p.heroUsed, shield: !!p.shield, superSpeed: p.superSpeed, sentry: !!p.stash, skipNext: p.skipNext })),
       current: this.current,
       direction: this.direction,
       top: { ...this.top() },
@@ -350,11 +368,12 @@ export class UnoGame {
     if (this.needsTarget(card)) {
       target = action.target;
       if (target === undefined || target === null || target === pid || target < 0 || target >= this.n
-        || this.players[target].out) {
+        || this.players[target].out || this.players[target].stash) {
         // Defaults: steal/destroy the biggest hand; a Seven swaps with the smallest.
         const seven = card.type === 'number';
-        target = this.opponentsOf(pid).sort((a, b) => (seven ? a.hand.length - b.hand.length
-          : b.hand.length - a.hand.length))[0].id;
+        const cands = this.opponentsOf(pid).filter((o) => !o.stash);
+        target = cands.length ? cands.sort((a, b) => (seven ? a.hand.length - b.hand.length
+          : b.hand.length - a.hand.length))[0].id : null;
       }
     }
 
@@ -365,8 +384,11 @@ export class UnoGame {
       && p.hand.some((c) => c !== card && c.color === prevColor);
 
     p.hand.splice(idx, 1);
+    // A HERO card on top of the pile leaves the match once it's covered.
+    if (isHero(this.top())) this.removed.push(this.discard.pop());
     this.discard.push(card);
     this.drawnCard = null;
+    if (isHero(card)) { p.heroUsed = card.type; this.stats.heroes++; }
     if (action.sayUno) p.saidUno = true;
     this.activeColor = color;
     this.stats.cardsPlayed++;
@@ -379,7 +401,7 @@ export class UnoGame {
     }
     p.saidUno = false;
 
-    const out = p.hand.length === 0;
+    let out = p.hand.length === 0;
     if (!out && this.mode === 'chaos') {
       const gain = Math.round((METER_GAIN[card.type] || 0) * this.meterScale * (1 + Math.min(0.5, 0.05 * this.chaosLevel)));
       if (gain) { this.meter = Math.min(100, this.meter + gain); this.emit({ t: 'meter', value: this.meter }); }
@@ -391,10 +413,12 @@ export class UnoGame {
     if (!out || FINISHING_EFFECTS.has(card.type)) this._effect(pid, card, target, illegal, prevColor);
     histEntry.next = this.current;
     if (this.phase !== 'turn') return { ok: true };
+    // A finishing blow can rebound (Captain America's shield) and refill the hand.
+    if (out && p.hand.length > 0) out = false;
 
     if (out) {
       // Final penalty still lands (it counts towards the winner's score).
-      if (this.pending && this.phase === 'turn') {
+      if (this.pending && this.phase === 'turn' && this.pending.attacker === pid) {
         const victim = this.current;
         const amt = this.pending.amount;
         this.pending = null;
@@ -432,18 +456,24 @@ export class UnoGame {
         this._advance(1);
         break;
       case 'skip':
-        this.emit({ t: 'skip', p: this.nextIndex(1) });
-        this._advance(2);
+        this._skipNextPlayer(pid);
         break;
       case 'reverse':
         this.direction *= -1;
         this.emit({ t: 'direction', dir: this.direction });
-        if (this.activeCount() === 2) { this.emit({ t: 'skip', p: this.nextIndex(1) }); this._advance(2); }
+        if (this.activeCount() === 2) this._skipNextPlayer(pid);
         else this._advance(1);
         break;
       case 'draw2':
       case 'wild4':
       case 'plus10': {
+        if (this.players[pid].superSpeed > 0) {
+          // Super Speed: nobody can respond, the penalty lands at once.
+          const victim = this.nextIndex(1);
+          this._penalize(pid, victim, DRAW_VALUE[card.type] * m, 'penalty');
+          this._advance(1);
+          break;
+        }
         const stacked = !!this.pending;
         if (!this.pending) this.pending = { amount: 0, kind: card.type, attacker: pid };
         this.pending.amount += DRAW_VALUE[card.type] * m;
@@ -471,38 +501,113 @@ export class UnoGame {
         } else this._advance(1);
         break;
       case 'everyone4':
-        for (const o of this.opponentsOf(pid)) this._drawCards(o.id, 4 * m, 'everyone4');
+        for (const o of this.opponentsOf(pid)) this._penalize(pid, o.id, 4 * m, 'everyone4');
         this._advance(1);
         break;
       case 'laststand':
-        for (const o of this.opponentsOf(pid)) this._drawCards(o.id, 5 * m, 'laststand');
+        for (const o of this.opponentsOf(pid)) this._penalize(pid, o.id, 5 * m, 'laststand');
         this._advance(1);
         break;
       case 'ultreverse':
         this.direction *= -1;
         this.emit({ t: 'direction', dir: this.direction });
-        this.emit({ t: 'skip', p: this.nextIndex(1) });
-        this._advance(2);
+        this._skipNextPlayer(pid);
         break;
       case 'steal3': {
-        const t = this.players[target];
-        const k = Math.min(3, Math.max(0, t.hand.length - 2));
+        if (target === null) { this._advance(1); break; }
+        // Captain America's shield turns the theft around.
+        const [thief, victim] = this._shielded(target, pid) ? [target, pid] : [pid, target];
+        const t = this.players[victim];
+        const k = Math.min(3, Math.max(0, t.hand.filter((c) => !isHero(c)).length - 2));
         const ids = this._takeRandom(t, k);
-        this.players[pid].hand.push(...ids.map((id) => this.card(id)));
-        this.emit({ t: 'transfer', from: target, to: pid, ids, reason: 'steal3' });
-        this.history.push({ t: 'transfer', from: target, to: pid, n: ids.length });
+        this.players[thief].hand.push(...ids.map((id) => this.card(id)));
+        this.emit({ t: 'transfer', from: victim, to: thief, ids, reason: 'steal3' });
+        this.history.push({ t: 'transfer', from: victim, to: thief, n: ids.length });
         this._advance(1);
         break;
       }
       case 'destroyer': {
-        const t = this.players[target];
-        const k = Math.min(3, Math.max(0, t.hand.length - 2));
+        if (target === null) { this._advance(1); break; }
+        const victim = this._shielded(target, pid) ? pid : target;
+        const t = this.players[victim];
+        const k = Math.min(3, Math.max(0, t.hand.filter((c) => !isHero(c)).length - 2));
         const ids = this._takeRandom(t, k);
         const topCard = this.discard.pop();
         this.discard.push(...ids.map((id) => this.card(id)), topCard);
-        this.emit({ t: 'destroy', p: target, ids });
-        this.history.push({ t: 'destroy', p: target, cards: ids.map((id) => ({ ...this.card(id) })) });
+        this.emit({ t: 'destroy', p: victim, ids });
+        this.history.push({ t: 'destroy', p: victim, cards: ids.map((id) => ({ ...this.card(id) })) });
         this._advance(1);
+        break;
+      }
+      case 'hero_superman':
+        this.players[pid].superSpeed = 4;
+        this.emit({ t: 'hero', hero: 'superman', p: pid });
+        this.history.push({ t: 'hero', hero: 'superman', p: pid });
+        this._advance(1);
+        break;
+      case 'hero_cap': {
+        const pl = this.players[pid];
+        pl.shield = 'fresh';
+        this.emit({ t: 'hero', hero: 'cap', p: pid });
+        this.history.push({ t: 'hero', hero: 'cap', p: pid });
+        if (this.pending) {
+          // Played against a draw stack: the whole stack rebounds onto the attacker.
+          const att = this.pending.attacker;
+          this.pending.attacker = pid;
+          this.pending.challengeable = false;
+          this.pending.illegal = false;
+          const to = this.players[att].out ? this.nextIndex(1) : att;
+          this.emit({ t: 'shieldBlock', p: pid, to, amount: this.pending.amount, what: 'stack' });
+          this.emit({ t: 'pending', amount: this.pending.amount, kind: this.pending.kind, stacked: true });
+          this._setTurn(to);
+        } else this._advance(1);
+        break;
+      }
+      case 'hero_sentry': {
+        this.emit({ t: 'hero', hero: 'sentry', p: pid });
+        this.history.push({ t: 'hero', hero: 'sentry', p: pid });
+        for (const o of this.opponentsOf(pid)) {
+          if (this.phase !== 'turn') break;
+          this._drawCards(o.id, 15, 'sentry');
+          this.history.push({ t: 'draw', p: o.id, n: 15, voluntary: false });
+        }
+        if (this.phase !== 'turn') break;
+        // Set the real hand aside and hold one golden card for a round.
+        const pl = this.players[pid];
+        let gi = -1;
+        for (let i = this.drawPile.length - 1; i >= 0; i--) if (this.drawPile[i].type === 'number') { gi = i; break; }
+        if (gi < 0) { this._reshuffle(); for (let i = this.drawPile.length - 1; i >= 0; i--) if (this.drawPile[i].type === 'number') { gi = i; break; } }
+        if (gi >= 0) {
+          const golden = this.drawPile.splice(gi, 1)[0];
+          pl.stash = pl.hand;
+          pl.hand = [golden];
+          if (this.unoVulnerable === pid) this.unoVulnerable = null;
+          this.emit({ t: 'sentryGolden', p: pid, id: golden.id, stash: pl.stash.map((c) => c.id) });
+        }
+        this._advance(1);
+        break;
+      }
+      case 'hero_thor': {
+        this.emit({ t: 'hero', hero: 'thor', p: pid });
+        this.history.push({ t: 'hero', hero: 'thor', p: pid });
+        let i = this.nextIndex(1, pid);
+        let k = 1;
+        const strikes = [];
+        while (i !== pid && k <= this.n) {
+          strikes.push({ p: i, amount: 4 * k });
+          i = this.nextIndex(1, i);
+          k++;
+        }
+        for (const st of strikes) {
+          if (this.phase !== 'turn') break;
+          const o = this.players[st.p];
+          if (o.out) continue;
+          this.emit({ t: 'thorStrike', p: st.p, amount: st.amount });
+          this._drawCards(st.p, st.amount, 'thor');
+          this.history.push({ t: 'draw', p: st.p, n: st.amount, voluntary: false });
+          if (!o.out) o.skipNext = true;
+        }
+        if (this.phase === 'turn') this._advance(1);
         break;
       }
       case 'colorlock':
@@ -515,10 +620,15 @@ export class UnoGame {
         this._triggerChaos();
         break;
       case 'shufflehands': {
-        const pool = this.shuffle(this.active().flatMap((pl) => pl.hand));
-        for (const pl of this.active()) pl.hand = [];
-        let i = this.nextIndex(1);
-        for (const c of pool) { this.players[i].hand.push(c); i = this.nextIndex(1, i); }
+        this._keepHeroes(() => {
+          const mix = this.mixable();
+          const pool = this.shuffle(mix.flatMap((pl) => pl.hand));
+          for (const pl of mix) pl.hand = [];
+          const order = [];
+          let i = this.nextIndex(1);
+          for (let k = 0; k < this.n; k++) { if (mix.includes(this.players[i])) order.push(this.players[i]); i = this.nextIndex(1, i); }
+          pool.forEach((c, k) => order[k % order.length].hand.push(c));
+        });
         this.emit({ t: 'handsChanged', reason: 'shufflehands' });
         this.history.push({ t: 'handsMixed' });
         this._clearStaleUno();
@@ -528,6 +638,72 @@ export class UnoGame {
       default:
         this._advance(1);
     }
+  }
+
+  // Is `pid` protected by Captain America's shield against an attack from `attacker`?
+  _shielded(pid, attacker) {
+    const p = this.players[pid];
+    if (!p.shield || pid === attacker) return false;
+    this.emit({ t: 'shieldBlock', p: pid, to: attacker });
+    return true;
+  }
+
+  // A draw penalty from attacker → victim (rebounds off a shield).
+  _penalize(attacker, victim, amount, reason) {
+    const to = this._shielded(victim, attacker) ? attacker : victim;
+    this._drawCards(to, amount, reason);
+  }
+
+  // Skip the next player — or, if they are shielded, the attacker loses their next turn.
+  _skipNextPlayer(pid) {
+    const victim = this.nextIndex(1);
+    if (this._shielded(victim, pid)) {
+      this.players[pid].skipNext = true;
+      this._advance(1);
+      return;
+    }
+    if (this.players[pid].superSpeed > 0) {
+      this.players[victim].skipNext = true; // lands after Super Speed ends
+      this.emit({ t: 'skip', p: victim });
+      this._advance(1);
+      return;
+    }
+    this.emit({ t: 'skip', p: victim });
+    this._advance(2);
+  }
+
+  // Sentry's golden card resolves at the start of its owner's next turn.
+  _resolveSentry(pid) {
+    const p = this.players[pid];
+    const golden = p.hand[0];
+    const top = this.top();
+    const exact = golden && top && golden.type === 'number' && top.type === 'number'
+      && golden.color === top.color && golden.value === top.value;
+    if (exact) {
+      p.hand = [];
+      this.discard.push(golden);
+      this.activeColor = golden.color;
+      this.emit({ t: 'sentryResolve', p: pid, exact: true, id: golden.id });
+      this.drawPile.unshift(...p.stash);
+      p.stash = null;
+      this._win(pid, 'sentry');
+      return;
+    }
+    this.drawPile.unshift(golden);
+    p.hand = p.stash.concat(p.hand.slice(1));
+    p.stash = null;
+    this.emit({ t: 'sentryResolve', p: pid, exact: false, id: golden.id });
+  }
+
+  // Run a hand-mixing effect while HERO cards stay with their owners.
+  _keepHeroes(fn) {
+    const kept = this.players.map((p) => {
+      const h = p.hand.filter(isHero);
+      if (h.length) p.hand = p.hand.filter((c) => !isHero(c));
+      return h;
+    });
+    fn();
+    this.players.forEach((p, i) => { if (kept[i].length) p.hand.push(...kept[i]); });
   }
 
   _sevenSwap(pid, target) {
@@ -563,11 +739,15 @@ export class UnoGame {
     return this._play(pid, { ...action, jump: true });
   }
 
+  // Take k random cards from a hand. HERO cards can never be taken.
   _takeRandom(player, k) {
     const ids = [];
     for (let i = 0; i < k; i++) {
-      const j = Math.floor(this.rng() * player.hand.length);
-      ids.push(player.hand.splice(j, 1)[0].id);
+      const pool = player.hand.filter((c) => !isHero(c));
+      if (!pool.length) break;
+      const c = pool[Math.floor(this.rng() * pool.length)];
+      player.hand.splice(player.hand.indexOf(c), 1);
+      ids.push(c.id);
     }
     return ids;
   }
@@ -657,7 +837,8 @@ export class UnoGame {
   }
 
   _catch(pid, target) {
-    if (this.unoVulnerable === null || this.unoVulnerable !== target || target === pid) {
+    if (!this.canCatch(pid, target)) {
+      if (this.superSpeedActive()) return { ok: false, error: 'Super Speed: no interruptions' };
       return { ok: false, error: 'Nobody to catch' };
     }
     this.unoVulnerable = null;
@@ -678,6 +859,8 @@ export class UnoGame {
       p.hand = [];
       if (this.unoVulnerable === t) this.unoVulnerable = null;
     }
+    this.removed.push(...pool.filter(isHero));
+    for (let i = pool.length - 1; i >= 0; i--) if (isHero(pool[i])) pool.splice(i, 1);
     this.emit({ t: 'mercy', by: pid, out: targets });
     this.history.push({ t: 'mercy', by: pid, out: targets });
     for (const t of targets) this.history.push({ t: 'eliminated', p: t });
@@ -730,12 +913,19 @@ export class UnoGame {
     const p = this.players[pid];
     const ids = [];
     if (p.out) return ids;
-    if (this.mode === 'chaos') n = Math.min(n, this.overloadLimit - p.hand.length);
+    if (this.mode === 'chaos') n = Math.min(n, this.overloadLimit - this.handCount(p));
+    const into = p.stash || p.hand; // Sentry's set-aside hand keeps receiving penalties
     for (let i = 0; i < n; i++) {
       if (this.drawPile.length === 0) this._reshuffle();
       if (this.drawPile.length === 0) this._addDeck();
-      const c = this.drawPile.pop();
-      p.hand.push(c);
+      let c = this.drawPile.pop();
+      // One HERO per player per match: extra heroes go back to the bottom of the deck.
+      let guard = 0;
+      while (isHero(c) && (p.heroUsed || into.some(isHero) || p.stash) && guard++ < 8) {
+        this.drawPile.unshift(c);
+        c = this.drawPile.pop();
+      }
+      into.push(c);
       ids.push(c.id);
     }
     if (ids.length) this.emit({ t: 'draw', p: pid, ids, reason });
@@ -746,11 +936,16 @@ export class UnoGame {
 
   _overloadCheck(pid) {
     const p = this.players[pid];
-    if (this.mode !== 'chaos' || p.out || p.hand.length < this.overloadLimit || this.phase !== 'turn') return;
+    if (this.mode !== 'chaos' || p.out || this.handCount(p) < this.overloadLimit || this.phase !== 'turn') return;
     p.out = true;
-    const ids = p.hand.map((c) => c.id);
-    this.drawPile.unshift(...this.shuffle(p.hand));
+    const all = p.hand.concat(p.stash || []);
+    const ids = all.map((c) => c.id);
+    this.removed.push(...all.filter(isHero)); // an unused HERO leaves the match with its owner
+    this.drawPile.unshift(...this.shuffle(all.filter((c) => !isHero(c))));
     p.hand = [];
+    p.stash = null;
+    p.superSpeed = 0;
+    p.shield = null;
     if (this.unoVulnerable === pid) this.unoVulnerable = null;
     this.emit({ t: 'eliminated', p: pid, ids, reason: 'overload' });
     this.history.push({ t: 'eliminated', p: pid });
@@ -767,7 +962,8 @@ export class UnoGame {
   _reshuffle() {
     if (this.discard.length <= 1) return;
     const top = this.discard.pop();
-    const rest = this.shuffle(this.discard);
+    this.removed.push(...this.discard.filter(isHero));
+    const rest = this.shuffle(this.discard.filter((c) => !isHero(c)));
     this.discard = [top];
     this.drawPile = rest.concat(this.drawPile);
     this.emit({ t: 'reshuffle', ids: rest.map((c) => c.id) });
@@ -775,6 +971,34 @@ export class UnoGame {
   }
 
   _setTurn(idx) {
+    // Shield lifetime: activated ('fresh') → survives one full round ('armed') → ends
+    // when its owner finishes their next turn.
+    const prev = this.players[this.current];
+    if (prev && prev.id !== idx) {
+      if (prev.shield === 'armed') { prev.shield = null; this.emit({ t: 'shieldEnd', p: prev.id }); }
+      else if (prev.shield === 'fresh') prev.shield = 'armed';
+    }
+    for (let guard = 0; guard < this.n * 3 && this.phase === 'turn'; guard++) {
+      const p = this.players[idx];
+      if (p.out) { idx = this.nextIndex(1, idx); continue; }
+      if (p.stash) { this._resolveSentry(idx); if (this.phase !== 'turn') return; }
+      if (this.pending && p.shield && this.pending.attacker !== idx && !this.players[this.pending.attacker].out) {
+        const att = this.pending.attacker;
+        this.pending.attacker = idx;
+        this.emit({ t: 'shieldBlock', p: idx, to: att, amount: this.pending.amount, what: 'stack' });
+        this.emit({ t: 'pending', amount: this.pending.amount, kind: this.pending.kind, stacked: true });
+        idx = att;
+        continue;
+      }
+      if (p.skipNext) {
+        p.skipNext = false;
+        this.emit({ t: 'skip', p: idx });
+        idx = this.nextIndex(1, idx);
+        continue;
+      }
+      break;
+    }
+    if (this.phase !== 'turn') return;
     this.current = idx;
     this.turn++;
     this.drawnCard = null;
@@ -782,7 +1006,16 @@ export class UnoGame {
     this.emit({ t: 'turn', p: this.current });
   }
 
-  _advance(steps) { this._setTurn(this.nextIndex(steps)); }
+  _advance(steps) {
+    const cp = this.players[this.current];
+    if (cp.superSpeed > 0 && !cp.out) {
+      cp.superSpeed--;
+      this.emit({ t: 'superTurn', p: cp.id, left: cp.superSpeed });
+      this._setTurn(cp.id);
+      return;
+    }
+    this._setTurn(this.nextIndex(steps));
+  }
 
   // Called after any action: if the current player was knocked out mid-turn, move on.
   _settle() {
@@ -832,10 +1065,12 @@ export class UnoGame {
       case 'reverseReality': {
         this.direction *= -1;
         this.emit({ t: 'direction', dir: this.direction });
-        const alive = this.active();
-        const sizes = alive.map((p) => p.hand.length);
-        const pool = this.shuffle(alive.flatMap((p) => p.hand));
-        alive.forEach((p, i) => { p.hand = pool.splice(0, sizes[i]); });
+        this._keepHeroes(() => {
+          const mix = this.mixable();
+          const sizes = mix.map((p) => p.hand.length);
+          const pool = this.shuffle(mix.flatMap((p) => p.hand));
+          mix.forEach((p, i) => { p.hand = pool.splice(0, sizes[i]); });
+        });
         this.emit({ t: 'handsChanged', reason: 'reverseReality' });
         this.history.push({ t: 'handsMixed' });
         break;
@@ -848,8 +1083,8 @@ export class UnoGame {
         break;
       }
       case 'heist': {
-        const thief = this.pick(this.active());
-        for (const o of this.opponentsOf(thief.id)) {
+        const thief = this.pick(this.mixable().length ? this.mixable() : this.active());
+        for (const o of this.opponentsOf(thief.id).filter((x) => !x.stash)) {
           const k = Math.min(this.randInt(1, 2), Math.max(0, o.hand.length - 1));
           if (!k) continue;
           const ids = this._takeRandom(o, k);
@@ -883,9 +1118,11 @@ export class UnoGame {
         fx.crisis += 2 * n;
         break;
       case 'swap': {
-        const a = this.pick(this.active());
-        const b = this.pick(this.active().filter((p) => p !== a));
-        [a.hand, b.hand] = [b.hand, a.hand];
+        const mix = this.mixable();
+        if (mix.length < 2) break;
+        const a = this.pick(mix);
+        const b = this.pick(mix.filter((p) => p !== a));
+        this._keepHeroes(() => { [a.hand, b.hand] = [b.hand, a.hand]; });
         this.emit({ t: 'handsChanged', reason: 'swap', a: a.id, b: b.id });
         this.history.push({ t: 'handsMixed', players: [a.id, b.id] });
         break;
@@ -903,7 +1140,7 @@ export class UnoGame {
 
   _checkWinAny(preferred) {
     if (this.phase !== 'turn') return;
-    const empty = this.players.filter((p) => !p.out && p.hand.length === 0);
+    const empty = this.players.filter((p) => !p.out && p.hand.length === 0 && !p.stash);
     if (!empty.length) return;
     const w = empty.find((p) => p.id === preferred) || empty[0];
     this._win(w.id);
@@ -917,7 +1154,7 @@ export class UnoGame {
     this.pending = null;
     this.unoVulnerable = null;
     this.roundScore = this.players.reduce(
-      (sum, p) => sum + (p.id === pid ? 0 : p.out ? 50 : p.hand.reduce((s, c) => s + cardPoints(c), 0)), 0);
+      (sum, p) => sum + (p.id === pid ? 0 : p.out ? 50 : p.hand.concat(p.stash || []).reduce((s, c) => s + cardPoints(c), 0)), 0);
     this.history.push({ t: 'win', p: pid });
     this.emit({ t: 'win', p: pid, score: this.roundScore, how });
   }
@@ -932,7 +1169,9 @@ export class UnoGame {
     };
     this.drawPile.forEach((c) => add(c, 'drawPile'));
     this.discard.forEach((c) => add(c, 'discard'));
+    this.removed.forEach((c) => add(c, 'removed'));
     this.players.forEach((p) => p.hand.forEach((c) => add(c, `hand ${p.id}`)));
+    this.players.forEach((p) => (p.stash || []).forEach((c) => add(c, `stash ${p.id}`)));
     if (seen.size !== this.cards.size) throw new Error(`Card count mismatch ${seen.size} vs ${this.cards.size}`);
     return true;
   }
