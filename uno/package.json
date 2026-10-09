@@ -1,0 +1,11 @@
+{
+  "name": "uno-3d",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ultra-realistic 3D UNO card game with Normal and Chaos modes",
+  "scripts": {
+    "test": "node tests/rules.test.js && node tests/simulate.test.js",
+    "start": "npx http-server -c-1 -p 8080 ."
+  }
+}
